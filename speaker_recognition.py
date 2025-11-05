@@ -332,11 +332,11 @@ def evaluate(
     # scipy.optimize.brentq находит корень функции f(x) = 0 в заданном интервале [a, b].
     # Мы ищем корень функции f(threshold) = fpr(threshold) - frr(threshold)
     try:
-        eer = brentq(lambda x: 1.0 - tpr[torch.argmin(torch.abs(thresholds - x))] - fpr[torch.argmin(torch.abs(thresholds - x))],
+        eer = brentq(lambda x: 1.0 - tpr[torch.argmin(torch.abs(torch.from_numpy(thresholds - x)))] - fpr[torch.argmin(torch.abs(torch.from_numpy(thresholds - x)))],
                      min(scores), max(scores))
         
         # Получаем соответствующий FAR/FRR в точке EER
-        eer_threshold_idx = torch.argmin(torch.abs(thresholds - eer))
+        eer_threshold_idx = torch.argmin(torch.abs(torch.from_numpy(thresholds - eer)))
         eer_far = fpr[eer_threshold_idx]
         eer_frr = frr[eer_threshold_idx]
         eer = (eer_far + eer_frr) / 2 # EER это среднее FAR и FRR в точке равенства
