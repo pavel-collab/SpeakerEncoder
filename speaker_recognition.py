@@ -11,7 +11,7 @@ class SpeakerDataset(torch.utils.data.Dataset):
     def __init__(self, dataset_dir: Path, use_cache: bool = True):
         super().__init__()
 
-        self.wav_files = list(dataset_dir.rglob("*.wav"))
+        self.wav_files = list(dataset_dir.rglob("*.wav")) # rglob используется для рекурсивного поиска, возващает итератор (генератор)
         self.labels = []
         self.cached_data: dict[int, tuple] = {}
         self.use_cache = use_cache
@@ -19,7 +19,7 @@ class SpeakerDataset(torch.utils.data.Dataset):
         class2idx = {}
         last_class_idx = -1
         for path in self.wav_files:
-            class_name = path.parent.stem
+            class_name = path.parent.stem # stem возвращает имя файла без расширения
 
             if class_name not in class2idx:
                 last_class_idx += 1
