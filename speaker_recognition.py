@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -5,7 +6,9 @@ import torch
 import torchaudio
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
-
+from sklearn.metrics import roc_curve
+from scipy.optimize import brentq
+from typing import List
 
 class SpeakerDataset(torch.utils.data.Dataset):
     def __init__(self, dataset_dir: Path, use_cache: bool = True):
@@ -97,30 +100,79 @@ class StatisticsPooling(torch.nn.Module):
 
 class AngularMarginSoftmax(torch.nn.Module):
     """
-    Angular Margin Softmax Loss
-    https://arxiv.org/abs/1906.07317
+    Angular Margin Softmax Loss (ArcFace variant)
+    https://arxiv.org/abs/1801.07698
     """
 
     def __init__(
         self, embedding_dim: int, num_classes: int, margin: float, scale: float
     ):
         super().__init__()
-        raise NotImplementedError
+        self.embedding_dim = embedding_dim
+        self.num_classes = num_classes
+        self.margin = margin
+        self.scale = scale
+
+        # Веса для каждого класса (центроиды)
+        self.weight = torch.nn.Parameter(torch.FloatTensor(num_classes, embedding_dim))
+        torch.nn.init.xavier_uniform_(self.weight) # Инициализация весов
+
+        self.cos_m = math.cos(margin)
+        self.sin_m = math.sin(margin)
+        self.th = math.cos(math.pi - margin) # Пороговое значение для предотвращения инверсии порядка
+        self.mm = math.sin(math.pi - margin) * margin
 
     def forward(self, embeddings: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """
-        embeddings: B x D
-        labels: B
-        return: scalar tensor
+        embeddings: B x D (batch_size x embedding_dim)
+        labels: B (batch_size)
+        return: scalar tensor (loss)
         """
-        raise NotImplementedError
+        # Нормализация эмбеддингов до единичной длины
+        norm_embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+        # Нормализация весов классов до единичной длины
+        norm_weight = torch.nn.functional.normalize(self.weight, p=2, dim=1)
+
+        # Вычисление косинусного сходства между эмбеддингами и весами классов
+        # (B x D) @ (D x C) -> B x C
+        cosine = torch.nn.functional.linear(norm_embeddings, norm_weight)
+        
+        # Получаем косинус для правильных классов
+        # detach() нужен, чтобы не вычислять градиенты для этих тензоров, так как они используются для создания маски,
+        # а не для обновления весов.
+        sine = torch.sqrt(1.0 - torch.pow(cosine.detach(), 2))
+        phi = cosine * self.cos_m - sine * self.sin_m # cos(theta + m)
+
+        # Если cos(theta) < cos(pi - m), то theta + m > pi, что может привести к инверсии порядка.
+        # В этом случае вместо cos(theta + m) используем cos(theta) - sin(pi - m) * m
+        # (Это часть реализации ArcFace для стабильности, смотрите оригинальную статью)
+        phi = torch.where(cosine > self.th, phi, cosine - self.mm)
+
+        # Создаем one-hot вектор для меток
+        one_hot = torch.zeros_like(cosine)
+        one_hot.scatter_(1, labels.view(-1, 1).long(), 1)
+
+        # Применяем модификацию только к правильным классам
+        output = (one_hot * phi) + ((1.0 - one_hot) * cosine)
+        output *= self.scale
+
+        # Используем CrossEntropyLoss, которая включает LogSoftmax
+        # reduce=True по умолчанию, усредняет по батчу
+        return torch.nn.functional.cross_entropy(output, labels)
 
     def predict(self, embeddings: torch.Tensor) -> torch.Tensor:
         """
         embeddings: B x D
-        return: B
+        return: B (predicted class indices)
         """
-        raise NotImplementedError
+        norm_embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+        norm_weight = torch.nn.functional.normalize(self.weight, p=2, dim=1)
+        
+        # Вычисление косинусного сходства
+        cosine = torch.nn.functional.linear(norm_embeddings, norm_weight)
+        
+        # Прогнозируем класс с наибольшим сходством
+        return torch.argmax(cosine, dim=1)
 
 
 class SpecScaler(torch.nn.Module):
@@ -157,12 +209,21 @@ class Conformer(torch.nn.Module):
             torch.nn.Linear(conf.d_model, conf.emb_size),
             torch.nn.ELU(),
         )
+        # Обратите внимание: слой `self.proj` не нужен, если используется AngularMarginSoftmax,
+        # так как она уже включает в себя логику классификации.
+        # Однако, если вы хотите использовать `forward` Conformer'а для получения scores
+        # в случае `CrossEntropyLoss`, его можно оставить.
+        # Для AngularMarginSoftmax `scores` будут использоваться только в функции `criterion`.
         self.proj = torch.nn.Sequential(torch.nn.Linear(conf.emb_size, conf.n_classes))
+
 
     def forward(self, wavs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
         features = self.transform(wavs)
 
+        # Длины фич после MelSpectrogram, которые имеют форму B x D x T. T - это количество фреймов.
+        # Каждый фрейм имеет размерность D (n_mels).
+        # Длина последовательности для каждого элемента батча - это количество фреймов.
         features_length = (
             torch.ones(features.shape[0], device=features.device) * features.shape[2]
         ).to(torch.long)
@@ -172,7 +233,9 @@ class Conformer(torch.nn.Module):
         encoded, encoded_len = self.backbone(features, features_length)
         emb = self.pooler(encoded, encoded_len)
         emb = self.extractor(emb)
-        scores = self.proj(emb)
+        scores = self.proj(emb) # Этот слой используется для CrossEntropyLoss
+                                # Для AngularMarginSoftmax он не будет использоваться напрямую для потерь,
+                                # но может быть полезен для отладки или других целей.
         return emb, scores
 
 
@@ -186,8 +249,8 @@ class ModelParams:
     n_layers: int = 2
     kernel_size: int = 5
     dropout: float = 0.0
-    emb_size: int = 16
-    n_classes: int = 377
+    emb_size: int = 16 # Размерность эмбеддинга
+    n_classes: int = 377 # Будет заменено на реальное количество классов
     sample_rate: int = 16_000
     n_fft: int = 400
     win_length: int = 400
@@ -217,7 +280,84 @@ class ModuleParams:
 def evaluate(
     model: torch.nn.Module, dataloader: torch.utils.data.DataLoader, device: str
 ) -> float:
-    raise NotImplementedError
+    model.eval() # Переводим модель в режим оценки
+    
+    embeddings_list: List[torch.Tensor] = []
+    labels_list: List[int] = []
+
+    with torch.no_grad(): # Отключаем расчет градиентов
+        for _, wavs, labels in tqdm(dataloader, desc="Evaluating", leave=False):
+            # В `Conformer` `forward` возвращает (emb, scores). Нам нужен `emb` для EER.
+            emb, _ = model.forward(wavs.to(device))
+            embeddings_list.append(emb.cpu()) # Перемещаем эмбеддинги на CPU
+            labels_list.extend(labels.tolist())
+
+    all_embeddings = torch.cat(embeddings_list, dim=0).numpy()
+    all_labels = torch.tensor(labels_list).numpy()
+
+    # Создаем пары для сравнения
+    # Для простоты, сгенерируем все возможные пары (можно оптимизировать для больших датасетов)
+    # или генерировать фиксированное количество положительных/отрицательных пар.
+    # Здесь мы будем сравнивать каждый эмбеддинг с каждым.
+
+    scores = [] # Список для косинусного сходства
+    actual_is_same = [] # Список, указывающий, являются ли пары от одного человека (1) или разных (0)
+
+    # Нормализуем все эмбеддинги перед сравнением
+    all_embeddings = all_embeddings / (
+        torch.norm(torch.from_numpy(all_embeddings), dim=1, keepdim=True).numpy() + 1e-9
+    )
+
+    num_samples = len(all_labels)
+    for i in range(num_samples):
+        for j in range(i + 1, num_samples): # Избегаем дубликатов и сравнения с самим собой
+            # Косинусное сходство
+            similarity = torch.dot(
+                torch.from_numpy(all_embeddings[i]), torch.from_numpy(all_embeddings[j])
+            ).item()
+            scores.append(similarity)
+            actual_is_same.append(1 if all_labels[i] == all_labels[j] else 0)
+
+    scores = torch.tensor(scores)
+    actual_is_same = torch.tensor(actual_is_same)
+
+    # Вычисление FAR, FRR и EER
+    # roc_curve возвращает FPR (False Positive Rate, то же что и FAR) и TPR (True Positive Rate)
+    fpr, tpr, thresholds = roc_curve(actual_is_same, scores)
+    
+    # FRR = 1 - TPR
+    frr = 1 - tpr
+
+    # EER - это точка, где FAR (fpr) == FRR (1 - tpr)
+    # scipy.optimize.brentq находит корень функции f(x) = 0 в заданном интервале [a, b].
+    # Мы ищем корень функции f(threshold) = fpr(threshold) - frr(threshold)
+    try:
+        eer = brentq(lambda x: 1.0 - tpr[torch.argmin(torch.abs(thresholds - x))] - fpr[torch.argmin(torch.abs(thresholds - x))],
+                     min(scores), max(scores))
+        
+        # Получаем соответствующий FAR/FRR в точке EER
+        eer_threshold_idx = torch.argmin(torch.abs(thresholds - eer))
+        eer_far = fpr[eer_threshold_idx]
+        eer_frr = frr[eer_threshold_idx]
+        eer = (eer_far + eer_frr) / 2 # EER это среднее FAR и FRR в точке равенства
+
+    except ValueError:
+        # В случае, если brentq не может найти корень (например, если нет пересечения),
+        # это может произойти, если пороги слишком ограничены или данных недостаточно.
+        # В таких случаях можно попробовать более простую интерполяцию или просто вернуть 1.0.
+        # Для стабильности и предотвращения ошибок, можно вернуть наилучшее приближение или 1.0.
+        print("Warning: Could not find EER using brentq. Approximating EER.")
+        min_abs_diff = float('inf')
+        eer_val = 1.0
+        for i in range(len(fpr)):
+            diff = abs(fpr[i] - frr[i])
+            if diff < min_abs_diff:
+                min_abs_diff = diff
+                eer_val = (fpr[i] + frr[i]) / 2.0
+        eer = eer_val
+        
+    model.train() # Возвращаем модель в режим обучения
+    return eer
 
 
 def main(conf: ModuleParams) -> None:
@@ -255,6 +395,11 @@ def main(conf: ModuleParams) -> None:
     if conf.loss_function == "cross_entropy":
         criterion = torch.nn.CrossEntropyLoss()
     elif conf.loss_function == "angular_margin":
+        # Убедитесь, что angular_margin и angular_scale заданы
+        if conf.angular_margin is None or conf.angular_scale is None:
+            raise ValueError(
+                "angular_margin and angular_scale must be provided for 'angular_margin' loss function."
+            )
         criterion = AngularMarginSoftmax(
             embedding_dim=model_params.emb_size,
             num_classes=n_classes,
@@ -270,7 +415,10 @@ def main(conf: ModuleParams) -> None:
 
     global_step = 0
 
+    best_eer = float('inf') # Для сохранения лучшей модели по EER
+
     for epoch in pbar:
+        model.train() # Переключаем модель в режим обучения
         epoch_losses = []
         epoch_correct = 0
         epoch_total = 0
@@ -278,16 +426,27 @@ def main(conf: ModuleParams) -> None:
         for batch in train_dataloader:
             _, wavs, labels = batch
 
-            _, scores = model.forward(wavs.to(conf.device))
+            # _, scores = model.forward(wavs.to(conf.device))
+            if conf.loss_function == "cross_entropy":
+                _, scores = model.forward(wavs.to(conf.device))
+                loss = criterion(scores, labels.to(conf.device))
+                predictions = torch.argmax(scores, dim=1)
+            elif conf.loss_function == "angular_margin":
+                embeddings, _ = model.forward(wavs.to(conf.device)) # Получаем эмбеддинги
+                loss = criterion(embeddings, labels.to(conf.device))
+                # Для AngularMarginSoftmax, предсказания делаются с помощью метода predict()
+                predictions = criterion.predict(embeddings)
+            else:
+                raise ValueError("Unexpected loss function during training loop.")
 
             optim.zero_grad()
 
-            loss = criterion(scores, labels.to(conf.device))
+            # loss = criterion(scores, labels.to(conf.device))
 
             loss.backward()
             optim.step()
 
-            predictions = torch.argmax(scores, dim=1)
+            # predictions = torch.argmax(scores, dim=1)
 
             correct = (predictions == labels.to(conf.device)).sum().item()
             epoch_correct += correct
@@ -301,7 +460,7 @@ def main(conf: ModuleParams) -> None:
 
             global_step += 1
 
-            pbar.set_postfix({"batch_loss": f"{loss.item():.2f}"})
+            pbar.set_postfix({"batch_loss": f"{loss.item():.2f}", "batch_acc": f"{correct / labels.size(0):.2f}"})
 
         avg_epoch_loss = sum(epoch_losses) / len(epoch_losses)
         epoch_accuracy = epoch_correct / epoch_total
@@ -309,14 +468,40 @@ def main(conf: ModuleParams) -> None:
         writer.add_scalar("Loss/Epoch", avg_epoch_loss, epoch)
         writer.add_scalar("Accuracy/Epoch", epoch_accuracy, epoch)
 
+        # Выводим точность тренировки
+        print(f"Epoch {epoch + 1}: Avg Train Loss = {avg_epoch_loss:.4f}, Train Accuracy = {epoch_accuracy:.4f}")
+
         if val_dataloader and (epoch + 1) % conf.validation_frequency == 0:
             print(f"\nRunning validation evaluation at epoch {epoch + 1}...")
-            try:
-                eer = evaluate(model, val_dataloader, conf.device)
-            except NotImplementedError:
-                eer = -1
+            eer = evaluate(model, val_dataloader, conf.device)
             writer.add_scalar("Validation/EER", eer, epoch)
+            print(f"Validation EER = {eer:.4f}")
 
+            # Сохраняем модель, если EER улучшился
+            if eer < best_eer:
+                best_eer = eer
+                torch.save(
+                    {
+                        "epoch": epoch + 1,
+                        "model_state_dict": model.state_dict(),
+                        "best_eer": best_eer,
+                        "loss_function": conf.loss_function,
+                        "angular_margin": (
+                            conf.angular_margin
+                            if conf.loss_function == "angular_margin"
+                            else None
+                        ),
+                        "angular_scale": (
+                            conf.angular_scale
+                            if conf.loss_function == "angular_margin"
+                            else None
+                        ),
+                    },
+                    conf.checkpoints_dir / f"best_model_eer_{best_eer:.4f}.ckpt",
+                )
+                print(f"Saved best model with EER: {best_eer:.4f}")
+
+        # Сохраняем чекпоинт в конце каждой эпохи (или по другой логике)
         torch.save(
             {
                 "epoch": epoch + 1,
@@ -342,18 +527,27 @@ def main(conf: ModuleParams) -> None:
 
 
 if __name__ == "__main__":
-
-    params = ModuleParams(
+    # Параметры для обучения с AngularMarginSoftmax
+    # Для AngularMarginSoftmax часто требуются специфические значения margin и scale.
+    # Типичные значения для ArcFace: m=0.5, s=64.
+    params_am = ModuleParams(
         dataset_dir=Path("./data/train"),
-        use_cache=False,
+        use_cache=False, # Можно установить в True, если датасет полностью помещается в RAM.
         checkpoints_dir=Path("./checkpoints"),
-        model_params=ModelParams(),
-        device="cpu",
-        num_workers=1,
-        n_epochs=20,
-        log_dir=Path("./logs/cross_entropy_hw_test"),
-        loss_function="cross_entropy",
+        model_params=ModelParams(
+            emb_size=128 # Увеличиваем размер эмбеддинга для лучшего разделения в угловом пространстве
+        ),
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        num_workers=4 if torch.cuda.is_available() else 1,
+        n_epochs=50, # Увеличиваем количество эпох, т.к. AM-Softmax сходится медленнее
+        log_dir=Path("./logs/angular_margin_hw_test"),
+        loss_function="angular_margin",
+        angular_margin=0.5,
+        angular_scale=64.0,
         validation_dir=Path("./data/dev"),
         validation_frequency=1,
+        learning_rate=1e-3,
+        batch_size=4
     )
-    main(params)
+    print("Starting training with AngularMarginSoftmax...")
+    main(params_am)
