@@ -279,7 +279,6 @@ class ModuleParams:
 
 from timer import timer
 
-@timer
 def evaluate(
     model: torch.nn.Module, dataloader: torch.utils.data.DataLoader, device: str
 ) -> float:
@@ -378,8 +377,6 @@ def evaluate_gpu(
     max_pairs: int = 100000
 ) -> float:
     model.eval()
-    
-    print(f"[DEBUG]: call evaluate gpu optimisation")
     
     embeddings_list: List[torch.Tensor] = []
     labels_list: List[int] = []
