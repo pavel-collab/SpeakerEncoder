@@ -277,73 +277,179 @@ class ModuleParams:
     validation_dir: Path | None = None
     validation_frequency: int = 5
 
+from timer import timer
 
+@timer
 def evaluate(
     model: torch.nn.Module, dataloader: torch.utils.data.DataLoader, device: str
+) -> float:
+    MAX_PAIRS = 100000
+    if device == "cuda":
+        return evaluate_gpu(model, dataloader, device, max_pairs=MAX_PAIRS)
+    else:
+        return evaluate_cpu(model, dataloader, device, max_pairs=MAX_PAIRS)
+
+def evaluate_cpu(
+    model: torch.nn.Module, dataloader: torch.utils.data.DataLoader, device: str,
+    max_pairs: int = 100000 # Ограничение на количество пар для больших датасетов
 ) -> float:
     model.eval()
     
     embeddings_list: List[torch.Tensor] = []
     labels_list: List[int] = []
-
+    
     with torch.no_grad():
         for _, wavs, labels in tqdm(dataloader, desc="Evaluating", leave=False):
             emb, _ = model.forward(wavs.to(device))
             embeddings_list.append(emb.cpu())
             labels_list.extend(labels.tolist())
-
+    
     all_embeddings = torch.cat(embeddings_list, dim=0)
     all_labels = torch.tensor(labels_list)
-
+    
     # Нормализация эмбеддингов
     all_embeddings = all_embeddings / (torch.norm(all_embeddings, dim=1, keepdim=True) + 1e-9)
-
-    # ОПТИМИЗАЦИЯ: Векторизованное вычисление косинусного сходства
-    # Вычисляем матрицу сходства размером (N, N) за одну операцию
-    similarity_matrix = torch.matmul(all_embeddings, all_embeddings.T)
-    
-    # Создаем маску для верхнего треугольника (исключая диагональ)
     num_samples = len(all_labels)
-    triu_indices = torch.triu_indices(num_samples, num_samples, offset=1)
     
-    # Извлекаем только верхний треугольник матрицы сходства
-    scores = similarity_matrix[triu_indices[0], triu_indices[1]]
+    # ОПТИМИЗАЦИЯ 1: Сэмплирование пар для очень больших датасетов
+    total_pairs = (num_samples * (num_samples - 1)) // 2
     
-    # Векторизованное создание меток: сравниваем метки для всех пар
-    labels_i = all_labels[triu_indices[0]]
-    labels_j = all_labels[triu_indices[1]]
-    actual_is_same = (labels_i == labels_j).long()
-
-    # Преобразуем в numpy для sklearn
-    scores_np = scores.numpy()
-    actual_is_same_np = actual_is_same.numpy()
-
-    # Вычисление FAR, FRR и EER
-    fpr, tpr, thresholds = roc_curve(actual_is_same_np, scores_np)
+    if total_pairs > max_pairs:
+        # Генерируем случайные пары вместо всех возможных
+        indices = torch.randperm(total_pairs)[:max_pairs]
+        
+        # Преобразуем линейные индексы в пары (i, j)
+        i_indices = torch.zeros(max_pairs, dtype=torch.long)
+        j_indices = torch.zeros(max_pairs, dtype=torch.long)
+        
+        for idx, linear_idx in enumerate(indices):
+            i = int((2 * num_samples - 1 - torch.sqrt((2 * num_samples - 1) ** 2 - 8 *linear_idx)) / 2)
+            j = int(linear_idx - i * (2 * num_samples - i - 1) / 2 + i + 1)
+            i_indices[idx] = i
+            j_indices[idx] = j
+    else:
+        # Используем все пары
+        triu_indices = torch.triu_indices(num_samples, num_samples, offset=1)
+        i_indices = triu_indices[0]
+        j_indices = triu_indices[1]
+        
+    # ОПТИМИЗАЦИЯ 2: Батчевое вычисление сходства (экономия памяти)
+    batch_size = 50000 # Размер батча для вычислений
+    num_pairs = len(i_indices)
+    scores_list = []
+    actual_is_same_list = []
+    
+    for start_idx in range(0, num_pairs, batch_size):
+        end_idx = min(start_idx + batch_size, num_pairs)
+        
+        batch_i = i_indices[start_idx:end_idx]
+        batch_j = j_indices[start_idx:end_idx]
+        
+        # Векторизованное вычисление косинусного сходства для батча
+        emb_i = all_embeddings[batch_i]
+        emb_j = all_embeddings[batch_j]
+        batch_scores = (emb_i * emb_j).sum(dim=1)
+        
+        # Векторизованное сравнение меток
+        labels_i = all_labels[batch_i]
+        labels_j = all_labels[batch_j]
+        batch_same = (labels_i == labels_j).long()
+        
+        scores_list.append(batch_scores)
+        actual_is_same_list.append(batch_same)
+    
+    scores = torch.cat(scores_list).numpy()
+    actual_is_same = torch.cat(actual_is_same_list).numpy()
+    
+    # ОПТИМИЗАЦИЯ 3: Упрощенное вычисление EER
+    fpr, tpr, thresholds = roc_curve(actual_is_same, scores)
     frr = 1 - tpr
-
-    # Вычисление EER
-    try:
-        eer = brentq(
-            lambda x: 1.0 - tpr[np.argmin(np.abs(thresholds - x))] - fpr[np.argmin(np.abs(thresholds - x))],
-            min(scores_np), max(scores_np)
-        )
-        
-        eer_threshold_idx = np.argmin(np.abs(thresholds - eer))
-        eer_far = fpr[eer_threshold_idx]
-        eer_frr = frr[eer_threshold_idx]
-        eer = (eer_far + eer_frr) / 2
-
-    except ValueError:
-        print("Warning: Could not find EER using brentq. Approximating EER.")
-        min_abs_diff = float('inf')
-        eer_val = 1.0
-        for i in range(len(fpr)):
-            diff = abs(fpr[i] - frr[i])
-            if diff < min_abs_diff:
-                min_abs_diff = diff
-                eer_val = (fpr[i] + frr[i]) / 2.0
-        eer = eer_val
-        
+    
+    # Находим точку, где |FAR - FRR| минимально
+    eer_idx = np.argmin(np.abs(fpr - frr))
+    eer = (fpr[eer_idx] + frr[eer_idx]) / 2.0
+    
     model.train()
+    
+    return eer
+
+def evaluate_gpu(
+    model: torch.nn.Module, dataloader: torch.utils.data.DataLoader, device: str,
+    max_pairs: int = 100000
+) -> float:
+    model.eval()
+    
+    print(f"[DEBUG]: call evaluate gpu optimisation")
+    
+    embeddings_list: List[torch.Tensor] = []
+    labels_list: List[int] = []
+    
+    with torch.no_grad():
+        for _, wavs, labels in tqdm(dataloader, desc="Evaluating", leave=False):
+            emb, _ = model.forward(wavs.to(device))
+            
+            # Оставляем эмбеддинги на GPU
+            embeddings_list.append(emb)
+            labels_list.extend(labels.tolist())
+            
+    all_embeddings = torch.cat(embeddings_list, dim=0)
+    all_labels = torch.tensor(labels_list, device=device)
+    
+    # Нормализация на GPU
+    all_embeddings = all_embeddings / (torch.norm(all_embeddings, dim=1, keepdim=True) + 1e-9)
+    
+    num_samples = len(all_labels)
+    total_pairs = (num_samples * (num_samples - 1)) // 2
+    
+    if total_pairs > max_pairs:
+        indices = torch.randperm(total_pairs, device=device)[:max_pairs]
+        i_indices = torch.zeros(max_pairs, dtype=torch.long, device=device)
+        j_indices = torch.zeros(max_pairs, dtype=torch.long, device=device)
+        
+        for idx, linear_idx in enumerate(indices):
+            i = int((2 * num_samples - 1 - torch.sqrt((2 * num_samples - 1) ** 2 - 8 * linear_idx)) / 2)
+            j = int(linear_idx - i * (2 * num_samples - i - 1) / 2 + i + 1)
+            i_indices[idx] = i
+            j_indices[idx] = j
+    else:
+        triu_indices = torch.triu_indices(num_samples, num_samples, offset=1, device=device)
+        i_indices = triu_indices[0]
+        j_indices = triu_indices[1]
+    
+    # Батчевые вычисления на GPU
+    batch_size = 50000
+    num_pairs = len(i_indices)
+    
+    scores_list = []
+    actual_is_same_list = []
+    
+    for start_idx in range(0, num_pairs, batch_size):
+        end_idx = min(start_idx + batch_size, num_pairs)
+        
+        batch_i = i_indices[start_idx:end_idx]
+        batch_j = j_indices[start_idx:end_idx]
+        
+        emb_i = all_embeddings[batch_i]
+        emb_j = all_embeddings[batch_j]
+        batch_scores = (emb_i * emb_j).sum(dim=1)
+        
+        labels_i = all_labels[batch_i]
+        labels_j = all_labels[batch_j]
+        batch_same = (labels_i == labels_j).long()
+        
+        scores_list.append(batch_scores)
+        actual_is_same_list.append(batch_same)
+    
+    # Переносим на CPU только в конце
+    scores = torch.cat(scores_list).cpu().numpy()
+    actual_is_same = torch.cat(actual_is_same_list).cpu().numpy()
+    
+    fpr, tpr, thresholds = roc_curve(actual_is_same, scores)
+    frr = 1 - tpr
+    
+    eer_idx = np.argmin(np.abs(fpr - frr))
+    eer = (fpr[eer_idx] + frr[eer_idx]) / 2.0
+    
+    model.train()
+    
     return eer
