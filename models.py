@@ -8,6 +8,7 @@ import torchaudio
 from tqdm.auto import tqdm
 from sklearn.metrics import roc_curve
 from scipy.optimize import brentq
+import numpy as np
 from typing import List
 
 class SpeakerDataset(torch.utils.data.Dataset):
@@ -280,72 +281,60 @@ class ModuleParams:
 def evaluate(
     model: torch.nn.Module, dataloader: torch.utils.data.DataLoader, device: str
 ) -> float:
-    model.eval() # Переводим модель в режим оценки
+    model.eval()
     
     embeddings_list: List[torch.Tensor] = []
     labels_list: List[int] = []
 
-    with torch.no_grad(): # Отключаем расчет градиентов
+    with torch.no_grad():
         for _, wavs, labels in tqdm(dataloader, desc="Evaluating", leave=False):
-            # В `Conformer` `forward` возвращает (emb, scores). Нам нужен `emb` для EER.
             emb, _ = model.forward(wavs.to(device))
-            embeddings_list.append(emb.cpu()) # Перемещаем эмбеддинги на CPU
+            embeddings_list.append(emb.cpu())
             labels_list.extend(labels.tolist())
 
-    all_embeddings = torch.cat(embeddings_list, dim=0).numpy()
-    all_labels = torch.tensor(labels_list).numpy()
+    all_embeddings = torch.cat(embeddings_list, dim=0)
+    all_labels = torch.tensor(labels_list)
 
-    # Создаем пары для сравнения
-    # Для простоты, сгенерируем все возможные пары (можно оптимизировать для больших датасетов)
-    # или генерировать фиксированное количество положительных/отрицательных пар.
-    # Здесь мы будем сравнивать каждый эмбеддинг с каждым.
+    # Нормализация эмбеддингов
+    all_embeddings = all_embeddings / (torch.norm(all_embeddings, dim=1, keepdim=True) + 1e-9)
 
-    scores = [] # Список для косинусного сходства
-    actual_is_same = [] # Список, указывающий, являются ли пары от одного человека (1) или разных (0)
-
-    # Нормализуем все эмбеддинги перед сравнением
-    all_embeddings = all_embeddings / (
-        torch.norm(torch.from_numpy(all_embeddings), dim=1, keepdim=True).numpy() + 1e-9
-    )
-
+    # ОПТИМИЗАЦИЯ: Векторизованное вычисление косинусного сходства
+    # Вычисляем матрицу сходства размером (N, N) за одну операцию
+    similarity_matrix = torch.matmul(all_embeddings, all_embeddings.T)
+    
+    # Создаем маску для верхнего треугольника (исключая диагональ)
     num_samples = len(all_labels)
-    for i in range(num_samples):
-        for j in range(i + 1, num_samples): # Избегаем дубликатов и сравнения с самим собой
-            # Косинусное сходство
-            similarity = torch.dot(
-                torch.from_numpy(all_embeddings[i]), torch.from_numpy(all_embeddings[j])
-            ).item()
-            scores.append(similarity)
-            actual_is_same.append(1 if all_labels[i] == all_labels[j] else 0)
+    triu_indices = torch.triu_indices(num_samples, num_samples, offset=1)
+    
+    # Извлекаем только верхний треугольник матрицы сходства
+    scores = similarity_matrix[triu_indices[0], triu_indices[1]]
+    
+    # Векторизованное создание меток: сравниваем метки для всех пар
+    labels_i = all_labels[triu_indices[0]]
+    labels_j = all_labels[triu_indices[1]]
+    actual_is_same = (labels_i == labels_j).long()
 
-    scores = torch.tensor(scores)
-    actual_is_same = torch.tensor(actual_is_same)
+    # Преобразуем в numpy для sklearn
+    scores_np = scores.numpy()
+    actual_is_same_np = actual_is_same.numpy()
 
     # Вычисление FAR, FRR и EER
-    # roc_curve возвращает FPR (False Positive Rate, то же что и FAR) и TPR (True Positive Rate)
-    fpr, tpr, thresholds = roc_curve(actual_is_same, scores)
-    
-    # FRR = 1 - TPR
+    fpr, tpr, thresholds = roc_curve(actual_is_same_np, scores_np)
     frr = 1 - tpr
 
-    # EER - это точка, где FAR (fpr) == FRR (1 - tpr)
-    # scipy.optimize.brentq находит корень функции f(x) = 0 в заданном интервале [a, b].
-    # Мы ищем корень функции f(threshold) = fpr(threshold) - frr(threshold)
+    # Вычисление EER
     try:
-        eer = brentq(lambda x: 1.0 - tpr[torch.argmin(torch.abs(torch.from_numpy(thresholds - x)))] - fpr[torch.argmin(torch.abs(torch.from_numpy(thresholds - x)))],
-                     min(scores), max(scores))
+        eer = brentq(
+            lambda x: 1.0 - tpr[np.argmin(np.abs(thresholds - x))] - fpr[np.argmin(np.abs(thresholds - x))],
+            min(scores_np), max(scores_np)
+        )
         
-        # Получаем соответствующий FAR/FRR в точке EER
-        eer_threshold_idx = torch.argmin(torch.abs(torch.from_numpy(thresholds - eer)))
+        eer_threshold_idx = np.argmin(np.abs(thresholds - eer))
         eer_far = fpr[eer_threshold_idx]
         eer_frr = frr[eer_threshold_idx]
-        eer = (eer_far + eer_frr) / 2 # EER это среднее FAR и FRR в точке равенства
+        eer = (eer_far + eer_frr) / 2
 
     except ValueError:
-        # В случае, если brentq не может найти корень (например, если нет пересечения),
-        # это может произойти, если пороги слишком ограничены или данных недостаточно.
-        # В таких случаях можно попробовать более простую интерполяцию или просто вернуть 1.0.
-        # Для стабильности и предотвращения ошибок, можно вернуть наилучшее приближение или 1.0.
         print("Warning: Could not find EER using brentq. Approximating EER.")
         min_abs_diff = float('inf')
         eer_val = 1.0
@@ -356,5 +345,5 @@ def evaluate(
                 eer_val = (fpr[i] + frr[i]) / 2.0
         eer = eer_val
         
-    model.train() # Возвращаем модель в режим обучения
+    model.train()
     return eer
