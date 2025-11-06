@@ -1,3 +1,5 @@
+from utils import fix_torch_seed
+
 import math
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -9,6 +11,8 @@ from tqdm.auto import tqdm
 from sklearn.metrics import roc_curve
 from scipy.optimize import brentq
 from typing import List
+from datetime import datetime
+import logging
 
 class SpeakerDataset(torch.utils.data.Dataset):
     def __init__(self, dataset_dir: Path, use_cache: bool = True):
@@ -410,6 +414,28 @@ def main(conf: ModuleParams) -> None:
         raise ValueError(f"Invalid loss function: {conf.loss_function}")
 
     optim = torch.optim.Adam(params=model.parameters(), lr=conf.learning_rate)
+    
+    #! разные варианты шедулеров для экспериментов
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #     optim,
+    #     max_lr=conf.learning_rate,
+    #     epochs=conf.n_epochs,
+    #     steps_per_epoch=len(train_dataloader),
+    #     pct_start=0.1
+    # )
+
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optim, 
+        T_max=100,  # Количество итераций до минимального LR
+        eta_min=conf.learning_rate  # Минимальный learning rate
+    )
+
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    #     optim,
+    #     T_0=50,        # Количество итераций до первого рестарта
+    #     T_mult=2,      # Множитель для увеличения T_0 после каждого рестарта
+    #     eta_min=conf.learning_rate
+    # )
 
     pbar = tqdm(range(conf.n_epochs), position=0, leave=True)
 
@@ -445,6 +471,7 @@ def main(conf: ModuleParams) -> None:
 
             loss.backward()
             optim.step()
+            scheduler.step()
 
             # predictions = torch.argmax(scores, dim=1)
 
@@ -502,31 +529,51 @@ def main(conf: ModuleParams) -> None:
                 print(f"Saved best model with EER: {best_eer:.4f}")
 
         # Сохраняем чекпоинт в конце каждой эпохи (или по другой логике)
-        torch.save(
-            {
-                "epoch": epoch + 1,
-                "model_state_dict": model.state_dict(),
-                "loss": avg_epoch_loss,
-                "accuracy": epoch_accuracy,
-                "loss_function": conf.loss_function,
-                "angular_margin": (
-                    conf.angular_margin
-                    if conf.loss_function == "angular_margin"
-                    else None
-                ),
-                "angular_scale": (
-                    conf.angular_scale
-                    if conf.loss_function == "angular_margin"
-                    else None
-                ),
-            },
-            conf.checkpoints_dir / f"epoch_{epoch + 1}.ckpt",
-        )
+        # torch.save(
+        #     {
+        #         "epoch": epoch + 1,
+        #         "model_state_dict": model.state_dict(),
+        #         "loss": avg_epoch_loss,
+        #         "accuracy": epoch_accuracy,
+        #         "loss_function": conf.loss_function,
+        #         "angular_margin": (
+        #             conf.angular_margin
+        #             if conf.loss_function == "angular_margin"
+        #             else None
+        #         ),
+        #         "angular_scale": (
+        #             conf.angular_scale
+        #             if conf.loss_function == "angular_margin"
+        #             else None
+        #         ),
+        #     },
+        #     conf.checkpoints_dir / f"epoch_{epoch + 1}.ckpt",
+        # )
 
     writer.close()
 
+LOG_PATH = "./logs"
 
 if __name__ == "__main__":
+    fix_torch_seed(seed=42)
+
+    # Создание отдельного логгера для ваших сообщений
+    local_logger = logging.getLogger("speacker_recognition")
+    local_logger.setLevel(logging.INFO)
+
+    # Создание файлового обработчика
+    file_handler = logging.FileHandler(f"{LOG_PATH}/local_log.log")
+    file_handler.setLevel(logging.INFO)
+
+    # Форматирование
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+
+    # Добавление обработчика к логгеру
+    local_logger.addHandler(file_handler)
+
+    time_log_marker = datetime.today().strftime("%d_%m_%Y_%H_%M")
+
     # Параметры для обучения с AngularMarginSoftmax
     # Для AngularMarginSoftmax часто требуются специфические значения margin и scale.
     # Типичные значения для ArcFace: m=0.5, s=64.
@@ -540,7 +587,7 @@ if __name__ == "__main__":
         device="cuda" if torch.cuda.is_available() else "cpu",
         num_workers=4 if torch.cuda.is_available() else 1,
         n_epochs=50, # Увеличиваем количество эпох, т.к. AM-Softmax сходится медленнее
-        log_dir=Path("./logs/angular_margin_hw_test"),
+        log_dir=Path(f"{LOG_PATH}/angular_margin_{time_log_marker}"),
         loss_function="angular_margin",
         angular_margin=0.5,
         angular_scale=64.0,
@@ -549,5 +596,7 @@ if __name__ == "__main__":
         learning_rate=1e-3,
         batch_size=4
     )
-    print("Starting training with AngularMarginSoftmax...")
+    local_logger.info(f"Starting training: tensorboard time log marker: {time_log_marker}")
+    local_logger.info(f"Current model params: {params_am}")
     main(params_am)
+    local_logger.info("Training completed")
