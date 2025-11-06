@@ -5,3 +5,6 @@ tensorboard
 dataclasses
 torchcodec
 tensorboard
+optuna
+plotly
+kaleido

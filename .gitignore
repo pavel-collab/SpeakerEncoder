@@ -5,3 +5,4 @@ venv
 logs
 checkpoints
 __pycache__
+result_images
