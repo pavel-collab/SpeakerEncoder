@@ -12,7 +12,7 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime
 
-N_EPOCH = 30
+N_EPOCH = 50
 
 def fix_torch_seed(seed: int = 42) -> None:
     # Python

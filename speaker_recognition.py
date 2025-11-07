@@ -5,7 +5,13 @@ import optuna
 from optuna.visualization import *
 import os
 
-N_TRIALS = 50 #TODO: посмотреть, что будет, если менять этот параметр
+import warnings
+
+# turn off the UserWarnings because lots of them are talking about 
+# library function refactoring, last or future deprecations
+warnings.filterwarnings('ignore', category=UserWarning)
+
+N_TRIALS = 10 #TODO: посмотреть, что будет, если менять этот параметр
 PATH_TO_IMAGES = "./result_images"
 
 @fix_seed

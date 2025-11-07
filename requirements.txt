@@ -9,3 +9,5 @@ optuna
 plotly
 kaleido
 scikit-learn
+matplotlib
+seaborn
