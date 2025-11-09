@@ -1,0 +1,15 @@
+optuna:
+  n_trials: 50
+  image_path: result_images
+
+train:
+  n_epochs: 50
+  batch_size: 4
+  num_workers: 4
+
+module:
+  model:
+    emb_size: 128
+  angular_margine: 0.1
+  angular_scale: 16.0
+  learning_rate: 0.0001

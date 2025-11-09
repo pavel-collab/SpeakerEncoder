@@ -1,5 +1,7 @@
-from utils import fix_seed, objective
-from logger import local_logger
+from src.utils.utils import fix_seed, objective
+from src.utils.logger import local_logger
+import hydra
+from omegaconf import DictConfig
 
 import optuna
 from optuna.visualization import *
@@ -11,27 +13,27 @@ import warnings
 # library function refactoring, last or future deprecations
 warnings.filterwarnings('ignore', category=UserWarning)
 
-N_TRIALS = 1 #TODO: посмотреть, что будет, если менять этот параметр
-PATH_TO_IMAGES = "./result_images"
-
 @fix_seed
-def main() -> None:
+@hydra.main(version_base=None, config_path="./configs", config_name="config.yaml")
+def main(cfg: DictConfig) -> None:
+    os.makedirs(f"{cfg.optuna.image_path}", exist_ok=True)
+    
     study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=N_TRIALS)
+    study.optimize(lambda trial: objective(trial, cfg.train.n_epochs), n_trials=cfg.optuna.n_trials)
 
     try:
         # Сохраняем графики в папку results/
         fig_hist = plot_optimization_history(study)
-        fig_hist.write_image(f"{PATH_TO_IMAGES}/history.png")
+        fig_hist.write_image(f"{cfg.optuna.image_path}/history.png")
 
         fig_contours = plot_contour(study)
-        fig_contours.write_image(f"{PATH_TO_IMAGES}/contour.png")
+        fig_contours.write_image(f"{cfg.optuna.image_path}/contour.png")
 
         fig_importance = plot_param_importances(study)
-        fig_importance.write_image(f"{PATH_TO_IMAGES}/param_importance.png")
+        fig_importance.write_image(f"{cfg.optuna.image_path}/param_importance.png")
 
         fig_parallel = plot_parallel_coordinate(study)
-        fig_parallel.write_image(f"{PATH_TO_IMAGES}/parallel_coordinates.png")
+        fig_parallel.write_image(f"{cfg.optuna.image_path}/parallel_coordinates.png")
     except Exception as ex:
         local_logger.error(f"Can't save trial plots because of error: {ex}")
     else:
@@ -41,6 +43,4 @@ def main() -> None:
         local_logger.info(f"\nЛучшая точность: {study.best_value:.4f}")
 
 if __name__ == "__main__":
-    os.makedirs(f"{PATH_TO_IMAGES}", exist_ok=True)
-
     main()
