@@ -5,3 +5,9 @@ tensorboard
 dataclasses
 torchcodec
 tensorboard
+optuna
+plotly
+kaleido
+scikit-learn
+matplotlib
+seaborn
