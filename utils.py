@@ -12,7 +12,7 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime
 
-N_EPOCH = 50
+N_EPOCH = 25
 
 def fix_torch_seed(seed: int = 42) -> None:
     # Python
@@ -84,19 +84,19 @@ def train(conf: ModelParams) -> float:
     
     #! разные варианты шедулеров для экспериментов
     #TODO: возможно стоит вынести это в параметры обучения и передавать в конфиге
-    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    #     optim,
-    #     max_lr=conf.learning_rate,
-    #     epochs=conf.n_epochs,
-    #     steps_per_epoch=len(train_dataloader),
-    #     pct_start=0.1
-    # )
-
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optim, 
-        T_max=100,  # Количество итераций до минимального LR
-        eta_min=conf.learning_rate  # Минимальный learning rate
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optim,
+        max_lr=conf.learning_rate,
+        epochs=conf.n_epochs,
+        steps_per_epoch=len(train_dataloader),
+        pct_start=0.1
     )
+
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    #     optim, 
+    #     T_max=100,  # Количество итераций до минимального LR
+    #     eta_min=conf.learning_rate  # Минимальный learning rate
+    # )
 
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
     #     optim,

@@ -99,6 +99,8 @@ class StatisticsPooling(torch.nn.Module):
         return torch.cat((avg, std), dim=1)
 
 
+# Фактически, этот класс выступает в качестве функции потерь
+# он выдает некоторую ошибку по заданным эмбеддингами и целевым меткам
 class AngularMarginSoftmax(torch.nn.Module):
     """
     Angular Margin Softmax Loss (ArcFace variant)
@@ -141,6 +143,9 @@ class AngularMarginSoftmax(torch.nn.Module):
         # Получаем косинус для правильных классов
         # detach() нужен, чтобы не вычислять градиенты для этих тензоров, так как они используются для создания маски,
         # а не для обновления весов.
+        # В данном случае, у нас реализован подход ArcFace
+        # По-сути, мы учим модель тому, что эмбеддинг должен находится в пределах некоторого марджина
+        # от угла заданного класса
         sine = torch.sqrt(1.0 - torch.pow(cosine.detach(), 2))
         phi = cosine * self.cos_m - sine * self.sin_m # cos(theta + m)
 

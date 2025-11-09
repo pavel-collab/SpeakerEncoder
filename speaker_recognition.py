@@ -11,7 +11,7 @@ import warnings
 # library function refactoring, last or future deprecations
 warnings.filterwarnings('ignore', category=UserWarning)
 
-N_TRIALS = 10 #TODO: посмотреть, что будет, если менять этот параметр
+N_TRIALS = 1 #TODO: посмотреть, что будет, если менять этот параметр
 PATH_TO_IMAGES = "./result_images"
 
 @fix_seed
