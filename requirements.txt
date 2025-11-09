@@ -11,3 +11,5 @@ kaleido
 scikit-learn
 matplotlib
 seaborn
+hydra-core
+omegaconf

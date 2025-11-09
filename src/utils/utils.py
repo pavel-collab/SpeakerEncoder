@@ -1,5 +1,8 @@
-from models import ModelParams, ModuleParams, SpeakerDataset, Conformer, AngularMarginSoftmax, evaluate
-from logger import local_logger, LOG_PATH
+from src.models.models import Conformer, AngularMarginSoftmax
+from src.models.params import ModelParams, ModuleParams
+from src.dataset.dataset import SpeakerDataset
+from src.models.utils import evaluate
+from src.utils.logger import local_logger, LOG_PATH
 
 from dataclasses import replace
 
@@ -11,8 +14,6 @@ import torch
 import numpy as np
 from pathlib import Path
 from datetime import datetime
-
-N_EPOCH = 25
 
 def fix_torch_seed(seed: int = 42) -> None:
     # Python
@@ -32,7 +33,7 @@ def fix_torch_seed(seed: int = 42) -> None:
     torch.backends.cudnn.benchmark = False
     torch.use_deterministic_algorithms(True, warn_only=True)
 
-def train(conf: ModelParams) -> float:
+def train(conf: ModuleParams) -> float:
     conf.log_dir.mkdir(exist_ok=True, parents=True)
     conf.checkpoints_dir.mkdir(exist_ok=True)
 
@@ -82,8 +83,6 @@ def train(conf: ModelParams) -> float:
 
     optim = torch.optim.Adam(params=model.parameters(), lr=conf.learning_rate)
     
-    #! разные варианты шедулеров для экспериментов
-    #TODO: возможно стоит вынести это в параметры обучения и передавать в конфиге
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optim,
         max_lr=conf.learning_rate,
@@ -91,19 +90,6 @@ def train(conf: ModelParams) -> float:
         steps_per_epoch=len(train_dataloader),
         pct_start=0.1
     )
-
-    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    #     optim, 
-    #     T_max=100,  # Количество итераций до минимального LR
-    #     eta_min=conf.learning_rate  # Минимальный learning rate
-    # )
-
-    # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    #     optim,
-    #     T_0=50,        # Количество итераций до первого рестарта
-    #     T_mult=2,      # Множитель для увеличения T_0 после каждого рестарта
-    #     eta_min=conf.learning_rate
-    # )
 
     pbar = tqdm(range(conf.n_epochs), position=0, leave=True)
 
@@ -175,31 +161,36 @@ def train(conf: ModelParams) -> float:
             # Сохраняем модель, если EER улучшился
             if eer < best_eer:
                 best_eer = eer
-                torch.save(
-                    {
-                        "epoch": epoch + 1,
-                        "model_state_dict": model.state_dict(),
-                        "best_eer": best_eer,
-                        "loss_function": conf.loss_function,
-                        "angular_margin": (
-                            conf.angular_margin
-                            if conf.loss_function == "angular_margin"
-                            else None
-                        ),
-                        "angular_scale": (
-                            conf.angular_scale
-                            if conf.loss_function == "angular_margin"
-                            else None
-                        ),
-                    },
-                    conf.checkpoints_dir / f"best_model_eer_{best_eer:.4f}.ckpt",
-                )
-                local_logger.info(f"Saved best model with EER: {best_eer:.4f}")
+                if conf.save_best_checkpoint:
+                    torch.save(
+                        {
+                            "epoch": epoch + 1,
+                            "model_state_dict": model.state_dict(),
+                            "best_eer": best_eer,
+                            "loss_function": conf.loss_function,
+                            "angular_margin": (
+                                conf.angular_margin
+                                if conf.loss_function == "angular_margin"
+                                else None
+                            ),
+                            "angular_scale": (
+                                conf.angular_scale
+                                if conf.loss_function == "angular_margin"
+                                else None
+                            ),
+                        },
+                        conf.checkpoints_dir / f"best_model_eer_{best_eer:.4f}.ckpt",
+                    )
+                    local_logger.info(f"Saved best model with EER: {best_eer:.4f}")
 
     writer.close()
     return best_eer
 
-def objective(trial):
+#! Notice, that is not a real objective function protorype, 
+#! the original objective function get only one argument: trial
+#! we will call this function via lambda function:
+#! lambda trial: objective(trial, n_epochs=30)
+def objective(trial, n_epochs=30):
     time_log_marker = datetime.today().strftime("%d_%m_%Y_%H_%M")
 
     # Определяем пространство поиска гиперпараметров
@@ -207,18 +198,16 @@ def objective(trial):
     # Параметры для обучения с AngularMarginSoftmax
     # Для AngularMarginSoftmax часто требуются специфические значения margin и scale.
     # Типичные значения для ArcFace: m=0.5, s=64.
-    #TODO: по хорошему, стоит разделить параметры модели и параметры эксперимента
     params_am = ModuleParams(
         dataset_dir=Path("./data/train"),
         use_cache=False, # Можно установить в True, если датасет полностью помещается в RAM.
         checkpoints_dir=Path("./checkpoints"),
         model_params=ModelParams(
-            emb_size=trial.suggest_categorical("emb_size", [16, 32, 64, 128, 256, 512])
+            emb_size=trial.suggest_categorical("emb_size", [16, 32, 64, 128, 256, 512, 1024, 2048])
         ),
         device="cuda" if torch.cuda.is_available() else "cpu",
-        # num_workers=4 if torch.cuda.is_available() else 1,
-        num_workers=4,
-        n_epochs=N_EPOCH, # Увеличиваем количество эпох, т.к. AM-Softmax сходится медленнее
+        num_workers=8,
+        n_epochs=n_epochs, # Увеличиваем количество эпох, т.к. AM-Softmax сходится медленнее
         log_dir=Path(f"{LOG_PATH}/angular_margin_{time_log_marker}"),
         loss_function="angular_margin",
         angular_margin=trial.suggest_float("angular_margin", 0.1, 0.9, log=True),
@@ -226,7 +215,7 @@ def objective(trial):
         validation_dir=Path("./data/dev"),
         validation_frequency=1,
         learning_rate=trial.suggest_float("learning_rate", 1e-4, 1e-3),
-        batch_size=4
+        batch_size=1024
     )
 
     local_logger.info(f"Starting training: tensorboard time log marker: {time_log_marker}")
