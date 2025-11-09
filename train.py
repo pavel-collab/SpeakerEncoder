@@ -36,7 +36,7 @@ def main(cfg: DictConfig) -> None:
         n_epochs=cfg.train.n_epochs, # Увеличиваем количество эпох, т.к. AM-Softmax сходится медленнее
         log_dir=Path(f"{LOG_PATH}/angular_margin_{time_log_marker}"),
         loss_function="angular_margin",
-        angular_margin=cfg.module.angular_margin,
+        angular_margin=cfg.module.angular_margine,
         angular_scale=cfg.module.angular_scale,
         validation_dir=Path("./data/dev"),
         validation_frequency=1,

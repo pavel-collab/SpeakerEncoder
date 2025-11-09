@@ -37,4 +37,4 @@ class ModuleParams:
     loss_function: str = "cross_entropy"  # "cross_entropy" or "angular_margin"
     validation_dir: Path | None = None
     validation_frequency: int = 5
-    save_best_checkpoint: False
+    save_best_checkpoint: bool = False

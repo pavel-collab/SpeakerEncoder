@@ -1,3 +1,9 @@
+import sys
+import os.path
+#! need to import code from modules in parent directory
+sys.path.append(
+    os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
+
 from src.utils.utils import fix_seed, objective
 from src.utils.logger import local_logger
 import hydra
@@ -5,7 +11,6 @@ from omegaconf import DictConfig
 
 import optuna
 from optuna.visualization import *
-import os
 
 import warnings
 
@@ -14,7 +19,7 @@ import warnings
 warnings.filterwarnings('ignore', category=UserWarning)
 
 @fix_seed
-@hydra.main(version_base=None, config_path="./configs", config_name="config.yaml")
+@hydra.main(version_base=None, config_path="../configs", config_name="config.yaml")
 def main(cfg: DictConfig) -> None:
     os.makedirs(f"{cfg.optuna.image_path}", exist_ok=True)
     
