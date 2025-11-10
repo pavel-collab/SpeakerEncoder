@@ -24,28 +24,33 @@ def main(cfg: DictConfig) -> None:
     os.makedirs(f"{cfg.optuna.image_path}", exist_ok=True)
     
     study = optuna.create_study(direction="minimize")
-    study.optimize(lambda trial: objective(trial, cfg.train.n_epochs), n_trials=cfg.optuna.n_trials)
-
     try:
-        # Сохраняем графики в папку results/
-        fig_hist = plot_optimization_history(study)
-        fig_hist.write_image(f"{cfg.optuna.image_path}/history.png")
-
-        fig_contours = plot_contour(study)
-        fig_contours.write_image(f"{cfg.optuna.image_path}/contour.png")
-
-        fig_importance = plot_param_importances(study)
-        fig_importance.write_image(f"{cfg.optuna.image_path}/param_importance.png")
-
-        fig_parallel = plot_parallel_coordinate(study)
-        fig_parallel.write_image(f"{cfg.optuna.image_path}/parallel_coordinates.png")
+        study.optimize(lambda trial: objective(trial, cfg.train.n_epochs), n_trials=cfg.optuna.n_trials)
+    except KeyboardInterrupt:
+        local_logger.warning("User send a keyboard interrupt")            
     except Exception as ex:
-        local_logger.error(f"Can't save trial plots because of error: {ex}")
-    else:
-        local_logger.info(f"Все графики успешно сохранены")
+        local_logger.error(f"Optuna эксперимент был нарушен из-за ошибки: {ex}")
     finally:
-        local_logger.info(f"\nЛучшая комбинация параметров:\n {study.best_params}")
-        local_logger.info(f"\nЛучшая точность: {study.best_value:.4f}")
+        try:
+            # Сохраняем графики в папку results/
+            fig_hist = plot_optimization_history(study)
+            fig_hist.write_image(f"{cfg.optuna.image_path}/history.png")
+
+            fig_contours = plot_contour(study)
+            fig_contours.write_image(f"{cfg.optuna.image_path}/contour.png")
+
+            fig_importance = plot_param_importances(study)
+            fig_importance.write_image(f"{cfg.optuna.image_path}/param_importance.png")
+
+            fig_parallel = plot_parallel_coordinate(study)
+            fig_parallel.write_image(f"{cfg.optuna.image_path}/parallel_coordinates.png")
+        except Exception as ex:
+            local_logger.error(f"Can't save trial plots because of error: {ex}")
+        else:
+            local_logger.info(f"Все графики успешно сохранены")
+        finally:
+            local_logger.info(f"\nЛучшая комбинация параметров:\n {study.best_params}")
+            local_logger.info(f"\nЛучшая точность: {study.best_value:.4f}")
 
 if __name__ == "__main__":
     main()

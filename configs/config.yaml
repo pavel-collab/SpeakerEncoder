@@ -3,7 +3,7 @@ optuna:
   image_path: result_images
 
 train:
-  n_epochs: 50
+  n_epochs: 15
   batch_size: 4
   num_workers: 4
 
