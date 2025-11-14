@@ -58,13 +58,3 @@ Loss модели:
     'learning_rate': 0.0009063493305418668
 }
 ```
-
-При сравнении обучения модели с данным набором гиперпараметров с использование angular margin loss и cross entropy loss получили следующие графики:
-
-Accuracy модели:
-
-Learning rate (применялся lr scheduler):
-
-Loss модели:
-
-Значение EER:
